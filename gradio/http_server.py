@@ -82,6 +82,33 @@ class Server(uvicorn.Server):
         self.thread.join(timeout=5)
 
 
+def _port_error_message(
+    server_ports: range | list[int],
+    last_error: OSError | None,
+    *,
+    platform: str = sys.platform,
+) -> str:
+    """Explain why no port could be bound, including Windows reserved ranges."""
+    ports = list(server_ports)
+    message = (
+        f"Cannot find empty port in range: {min(ports)}-{max(ports)}. "
+        "You can specify a different port by setting the GRADIO_SERVER_PORT environment variable "
+        "or passing the `server_port` parameter to `launch()`."
+    )
+    if platform != "win32" or last_error is None:
+        return message
+    winerror = getattr(last_error, "winerror", None)
+    errno = getattr(last_error, "errno", None)
+    if winerror == 10013 or errno in (13, 10013):
+        message += (
+            " On Windows, a port can be unavailable even when no process is listening if it is in an "
+            "excluded port range reserved by Hyper-V, WSL, or Docker. Run "
+            "`netsh int ipv4 show excludedportrange protocol=tcp` to list excluded ranges and choose "
+            "a port outside them."
+        )
+    return message
+
+
 def start_server(
     app: App,
     server_name: str | None = None,
@@ -126,6 +153,7 @@ def start_server(
         else range(INITIAL_PORT_VALUE, INITIAL_PORT_VALUE + TRY_NUM_PORTS)
     )
 
+    last_error: OSError | None = None
     for port in server_ports:
         try:
             # The fastest way to check if a port is available is to try to bind to it with socket.
@@ -176,12 +204,11 @@ def start_server(
                 server = Server(config=config)
             server.run_in_thread()
             break
-        except (OSError, ServerFailedToStartError):
-            pass
+        except (OSError, ServerFailedToStartError) as exc:
+            if isinstance(exc, OSError):
+                last_error = exc
     else:
-        raise OSError(
-            f"Cannot find empty port in range: {min(server_ports)}-{max(server_ports)}. You can specify a different port by setting the GRADIO_SERVER_PORT environment variable or passing the `server_port` parameter to `launch()`."
-        )
+        raise OSError(_port_error_message(server_ports, last_error)) from last_error
 
     if ssl_keyfile is not None:
         path_to_local_server = f"https://{url_host_name}:{port}/"
